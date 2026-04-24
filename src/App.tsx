@@ -531,25 +531,16 @@ export default function App() {
     const search = (acertoId || '').trim().toLowerCase();
     if (!search) return null;
     
-    // 1. Busca na sessão ativa (quem já está na lista ou tem compras)
-    // Prioriza busca exata por código de sacola (o que aparece como ID no painel)
-    let found = activeSessionCustomers.find(c => 
+    // 1. Busca APENAS na lista de compras (shoppingList)
+    // Isso garante que só sejam aceitos códigos que vieram da tela "live lista de compras"
+    const found = shoppingList.find(c => 
       String(c.codigo_cliente || "").toLowerCase() === search ||
       String(c.id).toLowerCase() === search || 
       (c.username || '').toLowerCase().trim() === search
     );
 
-    // 2. Se não achou na sessão, busca no banco de dados completo carregado
-    if (!found) {
-      found = customers.find(c => 
-        String(c.codigo_cliente || "").toLowerCase() === search ||
-        String(c.id).toLowerCase() === search || 
-        (c.username || '').toLowerCase().trim() === search
-      );
-    }
-    
     return found;
-  }, [acertoId, activeSessionCustomers, customers]);
+  }, [acertoId, shoppingList]);
 
   // Close dropdown on click outside
   useEffect(() => {
@@ -2251,10 +2242,21 @@ export default function App() {
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           e.preventDefault();
-                          refInput.current?.focus();
+                          if (acertoActiveCustomer) {
+                            refInput.current?.focus();
+                          } else {
+                            showToast('⚠️ Código não encontrado na lista de compras');
+                          }
                         }
                       }}
-                      className="w-full bg-[#1a1a1a] border border-white/5 focus:border-[#ccff00] focus:bg-black transition-all p-2 rounded-lg outline-none text-base font-bold placeholder:text-white/20"
+                      className={cn(
+                        "w-full bg-[#1a1a1a] border transition-all p-2 rounded-lg outline-none text-base font-bold placeholder:text-white/20",
+                        acertoActiveCustomer 
+                          ? "border-green-500/50 focus:border-green-500 bg-green-500/5" 
+                          : acertoId.length > 0 
+                            ? "border-red-500/50 focus:border-red-500 bg-red-500/5"
+                            : "border-white/5 focus:border-[#ccff00] focus:bg-black"
+                      )}
                       placeholder="CÓD. ou Username"
                     />
                   </div>
