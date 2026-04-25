@@ -29,6 +29,7 @@ import {
   Users,
   Database,
   X,
+  MessageCircle,
   Settings,
   MessageSquare,
   Play,
@@ -68,6 +69,9 @@ interface Customer {
   purchaseCount?: number;
   lastPurchaseTime?: string;
   codigo_cliente?: number | null;
+  telefone?: string;
+  observacoes?: string;
+  bloqueada?: boolean;
 }
 
 interface Purchase {
@@ -85,6 +89,7 @@ interface GroupedPurchase {
   customerId: number;
   username: string;
   nome_completo: string;
+  telefone?: string;
   items: Purchase[];
   total: number;
   paid: boolean;
@@ -119,6 +124,7 @@ const Navbar = ({
     { id: 'live', label: 'LIVE', icon: ShoppingBag },
     { id: 'acerto', label: 'ACERTO', icon: LayoutDashboard },
     { id: 'sacolas', label: 'SACOLAS', icon: Package },
+    { id: 'clientes', label: 'CLIENTES', icon: Users },
     { id: 'import', label: 'IMPORT', icon: Upload },
   ];
 
@@ -177,6 +183,9 @@ const Navbar = ({
   );
 };
 
+const normalize = (str: string) => 
+  (str || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('live');
   const [searchQuery, setSearchQuery] = useState('');
@@ -232,9 +241,21 @@ export default function App() {
     return [];
   });
 
+  const [sentWhatsappMessages, setSentWhatsappMessages] = useState<string[]>(() => {
+    const saved = localStorage.getItem('sentWhatsappMessages');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (e) {}
+    }
+    return [];
+  });
+
   useEffect(() => {
     localStorage.setItem('sentMessages', JSON.stringify(sentMessages));
   }, [sentMessages]);
+
+  useEffect(() => {
+    localStorage.setItem('sentWhatsappMessages', JSON.stringify(sentWhatsappMessages));
+  }, [sentWhatsappMessages]);
 
   // Focus Mode State
   const [isFocusModeOpen, setIsFocusModeOpen] = useState(false);
@@ -284,6 +305,11 @@ export default function App() {
   const [isSavingSale, setIsSavingSale] = useState(false);
   const [isAutoSaving, setIsAutoSaving] = useState(false);
   const [fechamentoSearch, setFechamentoSearch] = useState('');
+  const [clientesSearch, setClientesSearch] = useState('');
+  const [editingCustomerObservacoes, setEditingCustomerObservacoes] = useState<number | null>(null);
+  const [tempObservacoes, setTempObservacoes] = useState('');
+  const [editingCustomerTelefone, setEditingCustomerTelefone] = useState<number | null>(null);
+  const [tempTelefone, setTempTelefone] = useState('');
   const [bagFilterTab, setBagFilterTab] = useState<'todas' | 'pagas' | 'a_pagar' | 'entregues'>('todas');
   const [editingName, setEditingName] = useState('');
   const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
@@ -587,7 +613,7 @@ export default function App() {
       while (hasMore) {
         const { data, error } = await supabase
           .from('live_clientes')
-          .select('id, username, nome_completo, codigo_cliente')
+          .select('id, username, nome_completo, codigo_cliente, telefone, observacoes, bloqueada')
           .order('username', { ascending: true })
           .range(from, from + step - 1);
         
@@ -650,10 +676,6 @@ export default function App() {
     
     console.log(`Search triggered for: "${searchQuery}" | Customers in state: ${customers.length}`);
     
-    // Normalize query: lowercase and remove accents
-    const normalize = (str: string) => 
-      (str || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-      
     const rawQuery = searchQuery.startsWith('@') ? searchQuery.slice(1) : searchQuery;
     const cleanQuery = normalize(rawQuery);
     
@@ -748,15 +770,12 @@ export default function App() {
     }
 
     // Fallback: search in Supabase customers directly or create temporary
-    const normalizeQuery = (str: string) => 
-      (str || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
-      
     const rawQuery = searchQuery.startsWith('@') ? searchQuery.slice(1) : searchQuery;
-    const cleanQuery = normalizeQuery(rawQuery);
+    const cleanQuery = normalize(rawQuery);
     
     const found = customers.find(c => {
-      const uStr = normalizeQuery(c.username || "");
-      const nStr = normalizeQuery(c.nome_completo || "");
+      const uStr = normalize(c.username || "");
+      const nStr = normalize(c.nome_completo || "");
       const codeStr = c.codigo_cliente !== null && c.codigo_cliente !== undefined ? String(c.codigo_cliente) : "";
       
       // Se a query for apenas números, prioriza check exato no código (Sacola)
@@ -894,7 +913,12 @@ export default function App() {
       if (selectedCustomer) {
         if (e.key === 'Enter') {
           e.preventDefault();
-          confirmPurchase();
+          if (selectedCustomer.bloqueada) {
+            setSelectedCustomer(null);
+            showToast('⚠️ Cliente bloqueada. Ação cancelada.');
+          } else {
+            confirmPurchase();
+          }
         } else if (e.key === 'Escape') {
           e.preventDefault();
           setSelectedCustomer(null);
@@ -1078,18 +1102,20 @@ export default function App() {
     // 2. Process shopping list (O(N))
     const list = shoppingList.map(customer => {
       const cid = Number(customer.id);
+      const latestCustomer = customersMap.get(String(cid)) || customer;
       const customerPurchases = purchasesByCustomer.get(cid) || [];
       const isPaid = customerPurchases.length > 0 ? customerPurchases.every(p => p.paid) : manualPaidIds.includes(String(cid));
       return {
         customerId: cid,
-        username: customer.username || 'N/A',
-        nome_completo: customer.nome_completo || 'N/A',
+        username: latestCustomer.username || 'N/A',
+        nome_completo: latestCustomer.nome_completo || 'N/A',
+        telefone: latestCustomer.telefone,
         items: customerPurchases,
         total: customerPurchases.reduce((acc, p) => acc + (p.value * p.quantity), 0),
         paid: isPaid,
         delivered: deliveredIds.includes(String(cid)),
-        qtdLive: customer.purchaseCount || 0,
-        codigo_cliente: customer.codigo_cliente
+        qtdLive: latestCustomer.purchaseCount || 0,
+        codigo_cliente: latestCustomer.codigo_cliente
       };
     });
 
@@ -1105,6 +1131,7 @@ export default function App() {
           customerId,
           username: customer?.username || 'N/A',
           nome_completo: customer?.nome_completo || 'N/A',
+          telefone: customer?.telefone,
           items,
           total: items.reduce((acc, p) => acc + (p.value * p.quantity), 0),
           paid: isPaid,
@@ -1289,6 +1316,7 @@ export default function App() {
       // Clear all local state
       setPurchases([]);
       setSentMessages([]);
+      setSentWhatsappMessages([]);
       setShoppingList([]);
       setTimeline([]);
       setManualPaidIds([]);
@@ -1307,6 +1335,7 @@ export default function App() {
       // Remove specific keys from Local Storage
       localStorage.removeItem('purchases');
       localStorage.removeItem('sentMessages');
+      localStorage.removeItem('sentWhatsappMessages');
       localStorage.removeItem('shoppingList');
       localStorage.removeItem('timeline');
       localStorage.removeItem('manualPaidIds');
@@ -1562,6 +1591,7 @@ export default function App() {
           // Limpar estado local
           setPurchases([]);
           setSentMessages([]);
+          setSentWhatsappMessages([]);
           setShoppingList([]);
           setTimeline([]);
           setManualPaidIds([]);
@@ -1578,6 +1608,7 @@ export default function App() {
           // Limpar Local Storage
           localStorage.removeItem('purchases');
           localStorage.removeItem('sentMessages');
+          localStorage.removeItem('sentWhatsappMessages');
           localStorage.removeItem('shoppingList');
           localStorage.removeItem('timeline');
           localStorage.removeItem('manualPaidIds');
@@ -1705,6 +1736,34 @@ export default function App() {
       .replace(/\{\{total\}\}/g, total.toFixed(2).replace('.', ','));
   }, [messageTemplate]);
 
+  const generateWhatsAppMessage = (customerId: number, nome_completo: string, total: number, telefone: string) => {
+    if (sentWhatsappMessages.includes(String(customerId))) {
+      if (!window.confirm(`⚠️ Mensagem do WhatsApp já enviada para ${nome_completo}. Deseja gerar e enviar novamente?`)) {
+        return;
+      }
+    }
+
+    const message = generateMessageText(nome_completo, total);
+    
+    if (!telefone) {
+      alert('Telefone não cadastrado para esta cliente.');
+      return;
+    }
+
+    let cleanPhone = telefone.replace(/\D/g, ''); // Fix so that only numbers are sent
+    
+    // Add 55 if not begins with 55 and looks like brazillian mobile (10 or 11 digits)
+    if (cleanPhone.length >= 10 && cleanPhone.length <= 11 && !cleanPhone.startsWith('55')) {
+      cleanPhone = '55' + cleanPhone;
+    }
+    
+    // Send message state update
+    setSentWhatsappMessages(prev => [...new Set([...prev, String(customerId)])]);
+    
+    // Open whatsapp
+    window.open(`https://wa.me/${cleanPhone}?text=${encodeURIComponent(message)}`, '_blank');
+  };
+
   const generateInstagramMessage = (customerId: number, username: string, nome_completo: string, total: number) => {
     if (sentMessages.includes(String(customerId))) {
       if (!window.confirm(`⚠️ Mensagem já enviada para ${nome_completo}. Deseja gerar e enviar novamente?`)) {
@@ -1733,12 +1792,22 @@ export default function App() {
   };
 
   const startFocusMode = () => {
-    // Filter customers who have items and haven't received a message
-    const queue = filteredGroups.filter(g => g.items.length > 0 && !sentMessages.includes(String(g.customerId)));
+    // Filter customers who have items and haven't received a message (neither Whatsapp nor IG)
+    let queue = filteredGroups.filter(g => g.items.length > 0 && !sentMessages.includes(String(g.customerId)) && !sentWhatsappMessages.includes(String(g.customerId)));
     if (queue.length === 0) {
       alert('Todas as mensagens já foram enviadas ou não há sacolas com itens!');
       return;
     }
+
+    // Sort queue: Prioritize customers with phone numbers (WhatsApp) first
+    queue.sort((a, b) => {
+      const hasPhoneA = Boolean(a.telefone);
+      const hasPhoneB = Boolean(b.telefone);
+      if (hasPhoneA && !hasPhoneB) return -1;
+      if (!hasPhoneA && hasPhoneB) return 1;
+      return 0;
+    });
+
     setFocusQueue(queue);
     setCurrentFocusIndex(0);
     setIsFocusModeOpen(true);
@@ -1753,9 +1822,19 @@ export default function App() {
     }
   };
 
-  const handleFocusSend = () => {
+  const handleFocusSendInstagram = () => {
     const current = focusQueue[currentFocusIndex];
     generateInstagramMessage(current.customerId, current.username, current.nome_completo, current.total);
+    handleFocusNext();
+  };
+
+  const handleFocusSendWhatsApp = () => {
+    const current = focusQueue[currentFocusIndex];
+    if (!current.telefone) {
+      alert('Telefone não cadastrado!');
+      return;
+    }
+    generateWhatsAppMessage(current.customerId, current.nome_completo, current.total, current.telefone);
     handleFocusNext();
   };
 
@@ -1894,6 +1973,65 @@ export default function App() {
     } finally {
       setIsImportingProducts(false);
       e.target.value = ''; // Reset input
+    }
+  };
+
+  const toggleCustomerBlock = async (customer: Customer) => {
+    if (!supabase) return;
+    try {
+      const { error } = await supabase
+        .from('live_clientes')
+        .update({ bloqueada: !customer.bloqueada })
+        .eq('id', customer.id);
+        
+      if (error) throw error;
+      
+      setCustomers(prev => prev.map(c => 
+        c.id === customer.id ? { ...c, bloqueada: !customer.bloqueada } : c
+      ));
+      showToast(`Cliente ${customer.bloqueada ? 'desbloqueada' : 'bloqueada'} com sucesso.`);
+    } catch (err: any) {
+      showToast(`Erro ao atualizar status: ${err.message}`);
+    }
+  };
+
+  const saveCustomerObservacoes = async (customerId: number) => {
+    if (!supabase) return;
+    try {
+      const { error } = await supabase
+        .from('live_clientes')
+        .update({ observacoes: tempObservacoes })
+        .eq('id', customerId);
+        
+      if (error) throw error;
+      
+      setCustomers(prev => prev.map(c => 
+        c.id === customerId ? { ...c, observacoes: tempObservacoes } : c
+      ));
+      setEditingCustomerObservacoes(null);
+      showToast('Observações atualizadas com sucesso.');
+    } catch (err: any) {
+      showToast(`Erro ao salvar observação: ${err.message}`);
+    }
+  };
+
+  const saveCustomerTelefone = async (customerId: number) => {
+    if (!supabase) return;
+    try {
+      const { error } = await supabase
+        .from('live_clientes')
+        .update({ telefone: tempTelefone })
+        .eq('id', customerId);
+        
+      if (error) throw error;
+      
+      setCustomers(prev => prev.map(c => 
+        c.id === customerId ? { ...c, telefone: tempTelefone } : c
+      ));
+      setEditingCustomerTelefone(null);
+      showToast('Telefone atualizado com sucesso.');
+    } catch (err: any) {
+      showToast(`Erro ao salvar telefone: ${err.message}`);
     }
   };
 
@@ -2432,7 +2570,7 @@ export default function App() {
                                     
                                     const activeGroups = groupedPurchases.groups.filter(g => g.items.length > 0);
                                     const unpaidBags = activeGroups.filter(g => !g.paid);
-                                    const unsentMessages = activeGroups.filter(g => !sentMessages.includes(String(g.customerId)));
+                                    const unsentMessages = activeGroups.filter(g => !sentMessages.includes(String(g.customerId)) && !sentWhatsappMessages.includes(String(g.customerId)));
 
                                     let title = 'Salvar e Finalizar';
                                     let message = 'Tem certeza que deseja salvar e finalizar? Isso gravará no histórico e limpará todas as telas para uma nova live.';
@@ -2494,7 +2632,7 @@ export default function App() {
                         <th className="px-1 py-1">NOME</th>
                         <th className="px-2 py-1 w-24 text-center">QTD LIVE</th>
                         <th className="px-2 py-1 w-24 text-center">REF</th>
-                        <th className="px-2 py-1 w-10 text-center">MSG</th>
+                        <th className="px-2 py-1 w-16 text-center">MSG</th>
                         <th className="px-2 py-1 w-28 text-center">PAGO</th>
                         <th className="px-2 py-1 w-24 text-right">TOTAL</th>
                       </tr>
@@ -2618,25 +2756,48 @@ export default function App() {
                             </AnimatePresence>
                           </td>
                           <td className="px-2 py-0.5 text-center">
-                            <button 
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                generateInstagramMessage(group.customerId, group.username, group.nome_completo, group.total);
-                              }}
-                              className={cn(
-                                "p-1 rounded-md transition-all flex items-center justify-center mx-auto",
-                                sentMessages.includes(String(group.customerId))
-                                  ? "text-green-500 bg-green-500/10 hover:bg-green-500/20"
-                                  : "text-[#ccff00] hover:bg-[#ccff00]/10"
+                            <div className="flex items-center justify-center gap-1">
+                              {group.telefone && (
+                                <button 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    generateWhatsAppMessage(group.customerId, group.nome_completo, group.total, group.telefone!);
+                                  }}
+                                  className={cn(
+                                    "p-1 rounded-md transition-all flex items-center justify-center",
+                                    sentWhatsappMessages.includes(String(group.customerId))
+                                      ? "text-green-500 bg-green-500/10 hover:bg-green-500/20"
+                                      : "text-green-400 hover:bg-green-400/10"
+                                  )}
+                                  title={sentWhatsappMessages.includes(String(group.customerId)) ? "WhatsApp Enviado" : "Enviar WhatsApp"}
+                                >
+                                  {sentWhatsappMessages.includes(String(group.customerId)) ? (
+                                    <Check className="w-4 h-4" />
+                                  ) : (
+                                    <MessageCircle className="w-4 h-4" />
+                                  )}
+                                </button>
                               )}
-                              title={sentMessages.includes(String(group.customerId)) ? "Mensagem Enviada" : "Enviar Mensagem"}
-                            >
-                              {sentMessages.includes(String(group.customerId)) ? (
-                                <Check className="w-4 h-4" />
-                              ) : (
-                                <Instagram className="w-4 h-4" />
-                              )}
-                            </button>
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  generateInstagramMessage(group.customerId, group.username, group.nome_completo, group.total);
+                                }}
+                                className={cn(
+                                  "p-1 rounded-md transition-all flex items-center justify-center",
+                                  sentMessages.includes(String(group.customerId))
+                                    ? "text-green-500 bg-green-500/10 hover:bg-green-500/20"
+                                    : "text-[#ccff00] hover:bg-[#ccff00]/10"
+                                )}
+                                title={sentMessages.includes(String(group.customerId)) ? "Mensagem Enviada" : "Enviar Mensagem Instagram"}
+                              >
+                                {sentMessages.includes(String(group.customerId)) ? (
+                                  <Check className="w-4 h-4" />
+                                ) : (
+                                  <Instagram className="w-4 h-4" />
+                                )}
+                              </button>
+                            </div>
                           </td>
                           <td className="px-2 py-0.5 text-center">
                             <button
@@ -2925,6 +3086,195 @@ export default function App() {
                 )}
               </div>
             </motion.div>
+          ) : activeTab === 'clientes' ? (
+            <motion.div
+              key="clientes-tab"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-4"
+            >
+              <div className="bg-[#111] border border-white/5 p-4 rounded-xl shadow-2xl space-y-4">
+                <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+                  <div className="flex items-center gap-3">
+                    <Users className="text-[#ccff00] w-6 h-6" />
+                    <h2 className="text-xl font-black tracking-tight uppercase">Gerenciamento de Clientes</h2>
+                  </div>
+                  
+                  <div className="relative w-full md:w-96 group">
+                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#ccff00]/40 group-focus-within:text-[#ccff00] transition-colors" />
+                    <input
+                      type="text"
+                      placeholder="Buscar por nome, username ou cód..."
+                      value={clientesSearch}
+                      onChange={(e) => setClientesSearch(e.target.value)}
+                      className="w-full bg-black border border-white/10 focus:border-[#ccff00] h-11 pl-10 pr-4 rounded-xl outline-none text-sm font-bold text-white placeholder:text-white/20 transition-all"
+                    />
+                    {clientesSearch && (
+                      <button 
+                        onClick={() => setClientesSearch('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto rounded-lg border border-white/5">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-black/50 text-white/40 text-[10px] uppercase tracking-widest border-b border-white/5">
+                        <th className="p-3 font-black whitespace-nowrap">Cód.</th>
+                        <th className="p-3 font-black">Sacola (Username)</th>
+                        <th className="p-3 font-black">Nome Completo</th>
+                        <th className="p-3 font-black whitespace-nowrap min-w-[140px]">Telefone</th>
+                        <th className="p-3 font-black w-1/3">Observações</th>
+                        <th className="p-3 font-black text-center whitespace-nowrap">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 text-sm">
+                      {customers
+                        .filter(c => {
+                          const search = normalize(clientesSearch);
+                          if (!search) return true;
+                          
+                          const name = normalize(c.nome_completo || '');
+                          const user = normalize(c.username || '');
+                          const code = String(c.codigo_cliente || '');
+                          
+                          return name.includes(search) || user.includes(search) || code.includes(search);
+                        })
+                        // Sort by code natively
+                        .sort((a, b) => (a.codigo_cliente || 999999) - (b.codigo_cliente || 999999))
+                        .map((cliente) => (
+                        <tr key={cliente.id} className="hover:bg-white/[0.02] transition-colors">
+                          <td className="p-3 font-mono text-[#ccff00] font-black">
+                            {cliente.codigo_cliente || '-'}
+                          </td>
+                          <td className="p-3 font-bold text-white/80">
+                            {cliente.username}
+                          </td>
+                          <td className="p-3 text-white/60 text-xs font-medium uppercase">
+                            {cliente.nome_completo || <span className="text-red-500/50">NÃO CADASTRADO</span>}
+                          </td>
+                          <td className="p-3 text-white/60 font-mono text-xs whitespace-nowrap">
+                            {editingCustomerTelefone === cliente.id ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={tempTelefone}
+                                  onChange={(e) => {
+                                      // Only numbers, parentheses, dash, space
+                                      const val = e.target.value.replace(/[^\d() -]/g, '');
+                                      setTempTelefone(val);
+                                  }}
+                                  placeholder="(99) 99999-9999"
+                                  className="w-32 bg-black border border-[#ccff00]/30 focus:border-[#ccff00] px-2 py-1 rounded text-xs text-white outline-none"
+                                  autoFocus
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') saveCustomerTelefone(Number(cliente.id));
+                                    if (e.key === 'Escape') setEditingCustomerTelefone(null);
+                                  }}
+                                />
+                                <button
+                                  onClick={() => saveCustomerTelefone(Number(cliente.id))}
+                                  className="p-1.5 bg-[#ccff00]/20 text-[#ccff00] rounded hover:bg-[#ccff00] hover:text-black transition-colors"
+                                >
+                                  <Check className="w-3 h-3" />
+                                </button>
+                                <button
+                                  onClick={() => setEditingCustomerTelefone(null)}
+                                  className="p-1.5 bg-white/5 text-white/40 rounded hover:bg-white/10 hover:text-white transition-colors"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ) : (
+                              <div 
+                                onClick={() => {
+                                  setEditingCustomerTelefone(Number(cliente.id));
+                                  setTempTelefone(cliente.telefone || '');
+                                }}
+                                className="group flex items-center gap-2 cursor-text"
+                              >
+                                <span>{cliente.telefone || '-'}</span>
+                                <Edit2 className="w-3 h-3 text-white/0 group-hover:text-white/40 transition-colors" />
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            {editingCustomerObservacoes === cliente.id ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={tempObservacoes}
+                                  onChange={(e) => setTempObservacoes(e.target.value)}
+                                  className="flex-1 bg-black border border-[#ccff00]/30 focus:border-[#ccff00] px-2 py-1 rounded text-xs text-white outline-none"
+                                  autoFocus
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') saveCustomerObservacoes(Number(cliente.id));
+                                    if (e.key === 'Escape') setEditingCustomerObservacoes(null);
+                                  }}
+                                />
+                                <button
+                                  onClick={() => saveCustomerObservacoes(Number(cliente.id))}
+                                  className="p-1.5 bg-[#ccff00]/20 text-[#ccff00] rounded hover:bg-[#ccff00] hover:text-black transition-colors"
+                                >
+                                  <Check className="w-3 h-3" />
+                                </button>
+                                <button
+                                  onClick={() => setEditingCustomerObservacoes(null)}
+                                  className="p-1.5 bg-white/5 text-white/40 rounded hover:bg-white/10 hover:text-white transition-colors"
+                                >
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ) : (
+                              <div 
+                                onClick={() => {
+                                  setEditingCustomerObservacoes(Number(cliente.id));
+                                  setTempObservacoes(cliente.observacoes || '');
+                                }}
+                                className="group flex items-center gap-2 cursor-text"
+                              >
+                                <span className={cn(
+                                  "text-xs truncate max-w-[200px] md:max-w-xs",
+                                  cliente.observacoes ? "text-white/60" : "text-white/20 italic"
+                                )}>
+                                  {cliente.observacoes || 'Adicionar observação...'}
+                                </span>
+                                <Edit2 className="w-3 h-3 text-white/0 group-hover:text-white/40 transition-colors" />
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => toggleCustomerBlock(cliente)}
+                              className={cn(
+                                "px-3 py-1 rounded font-black text-[10px] uppercase tracking-wider transition-all",
+                                cliente.bloqueada 
+                                  ? "bg-red-500/20 text-red-500 border border-red-500/30 hover:bg-red-500 hover:text-white" 
+                                  : "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 hover:bg-emerald-500 hover:text-white"
+                              )}
+                            >
+                              {cliente.bloqueada ? 'Desbloquear' : 'Bloquear'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                <div className="flex justify-start items-center">
+                   <div className="text-[10px] font-black text-white/30 uppercase tracking-[0.2em]">
+                     {customers.length} CLIENTES CADASTRADOS
+                   </div>
+                </div>
+
+              </div>
+            </motion.div>
           ) : (
             <motion.div
               key="import-tab"
@@ -3134,14 +3484,24 @@ export default function App() {
               <div className="absolute top-0 left-0 w-full h-1 bg-[#ccff00]/50" />
               
               <div className="space-y-1">
-                <span className="text-[#ccff00]/40 font-mono text-xs tracking-[0.5em] uppercase">Customer Identified</span>
+                <span className={cn(
+                  "font-mono text-xs tracking-[0.5em] uppercase",
+                  selectedCustomer.bloqueada ? "text-red-500/60" : "text-[#ccff00]/40"
+                )}>
+                  {selectedCustomer.bloqueada ? 'CLIENTE BLOQUEADA' : 'Customer Identified'}
+                </span>
                   <motion.h1 
                   initial={{ opacity: 0, scale: 0.5 }}
                   animate={{ opacity: 1, scale: 1 }}
                   transition={{ delay: 0.2, type: 'spring' }}
-                  className="text-[80px] md:text-[150px] font-black leading-none text-[#ccff00] drop-shadow-[0_0_30px_rgba(204,255,0,0.3)]"
+                  className={cn(
+                    "font-black leading-none drop-shadow-[0_0_30px_rgba(204,255,0,0.3)]",
+                    selectedCustomer.bloqueada 
+                      ? "text-[60px] md:text-[100px] text-red-500 drop-shadow-[0_0_30px_rgba(239,68,68,0.3)] uppercase tracking-tighter" 
+                      : "text-[80px] md:text-[150px] text-[#ccff00]"
+                  )}
                 >
-                  {selectedCustomer.codigo_cliente || ''}
+                  {selectedCustomer.bloqueada ? 'Bloqueada' : (selectedCustomer.codigo_cliente || '')}
                 </motion.h1>
               </div>
 
@@ -3167,17 +3527,19 @@ export default function App() {
               </div>
 
               <div className="flex flex-col md:flex-row items-center justify-center gap-4 pt-4">
-                <button
-                  onClick={confirmPurchase}
-                  className="w-full md:w-auto px-8 py-3 bg-[#ccff00] text-black font-black text-lg rounded-lg hover:shadow-[0_0_30px_rgba(204,255,0,0.5)] transition-all flex items-center justify-center gap-2"
-                >
-                  CONFIRMAR COMPRA <CheckCircle2 className="w-6 h-6" />
-                </button>
+                {!selectedCustomer.bloqueada && (
+                  <button
+                    onClick={confirmPurchase}
+                    className="w-full md:w-auto px-8 py-3 bg-[#ccff00] text-black font-black text-lg rounded-lg hover:shadow-[0_0_30px_rgba(204,255,0,0.5)] transition-all flex items-center justify-center gap-2"
+                  >
+                    CONFIRMAR COMPRA <CheckCircle2 className="w-6 h-6" />
+                  </button>
+                )}
                 <button
                   onClick={() => setSelectedCustomer(null)}
                   className="w-full md:w-auto px-8 py-3 bg-white/5 text-white/40 font-black text-lg rounded-lg hover:bg-white/10 hover:text-white transition-all border border-white/10"
                 >
-                  CANCELAR
+                  {selectedCustomer.bloqueada ? 'FECHAR E CONTINUAR' : 'CANCELAR'}
                 </button>
               </div>
             </motion.div>
@@ -3559,14 +3921,25 @@ export default function App() {
               </div>
 
               <div className="mt-8 flex flex-col sm:flex-row gap-4">
-                <button
-                  onClick={handleFocusSend}
-                  autoFocus
-                  className="flex-1 py-4 bg-[#ccff00] text-black font-black text-sm uppercase tracking-widest rounded-xl hover:shadow-[0_0_30px_rgba(204,255,0,0.4)] transition-all flex items-center justify-center gap-3"
-                >
-                  <Copy className="w-5 h-5" />
-                  Copiar, Abrir e Marcar como Enviado
-                </button>
+                {focusQueue[currentFocusIndex].telefone ? (
+                  <button
+                    onClick={handleFocusSendWhatsApp}
+                    autoFocus
+                    className="flex-1 py-4 bg-green-500 text-black font-black text-sm uppercase tracking-widest rounded-xl hover:shadow-[0_0_30px_rgba(34,197,94,0.4)] transition-all flex items-center justify-center gap-3"
+                  >
+                    <MessageCircle className="w-5 h-5" />
+                    Enviar via WhatsApp
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleFocusSendInstagram}
+                    autoFocus
+                    className="flex-1 py-4 bg-[#ccff00] text-black font-black text-sm uppercase tracking-widest rounded-xl hover:shadow-[0_0_30px_rgba(204,255,0,0.4)] transition-all flex items-center justify-center gap-3"
+                  >
+                    <Instagram className="w-5 h-5" />
+                    Enviar via Instagram
+                  </button>
+                )}
                 <button
                   onClick={handleFocusNext}
                   className="px-8 py-4 bg-white/5 text-white/40 font-black text-sm uppercase tracking-widest rounded-xl hover:bg-white/10 hover:text-white transition-all border border-white/10 flex items-center justify-center gap-2"
