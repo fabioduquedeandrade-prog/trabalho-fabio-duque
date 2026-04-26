@@ -310,9 +310,90 @@ export default function App() {
   const [tempObservacoes, setTempObservacoes] = useState('');
   const [editingCustomerTelefone, setEditingCustomerTelefone] = useState<number | null>(null);
   const [tempTelefone, setTempTelefone] = useState('');
+  const [hoveredObs, setHoveredObs] = useState<{ text: string, x: number, y: number } | null>(null);
   const [bagFilterTab, setBagFilterTab] = useState<'todas' | 'pagas' | 'a_pagar' | 'entregues'>('todas');
   const [editingName, setEditingName] = useState('');
   const [expandedCustomerId, setExpandedCustomerId] = useState<string | null>(null);
+
+  const displayedCustomers = useMemo(() => {
+    if (clientesSearch) {
+      const cleanQuery = normalize(clientesSearch);
+      
+      const filtered = customers
+        .filter(c => {
+          const idStr = String(c.id || "").toLowerCase();
+          const codeStr = c.codigo_cliente !== null && c.codigo_cliente !== undefined ? String(c.codigo_cliente) : "";
+          const usernameStr = normalize(c.username || "");
+          const nameStr = normalize(c.nome_completo || "");
+          
+          if (/^\d+$/.test(cleanQuery)) {
+            return codeStr === cleanQuery || idStr === cleanQuery || codeStr.includes(cleanQuery);
+          }
+
+          return codeStr === cleanQuery || 
+                 codeStr.includes(cleanQuery) ||
+                 usernameStr.includes(cleanQuery) ||
+                 nameStr.includes(cleanQuery) ||
+                 (usernameStr + " " + nameStr).includes(cleanQuery);
+        })
+        .sort((a, b) => {
+          const aCode = String(a.codigo_cliente || "").toLowerCase();
+          const bCode = String(b.codigo_cliente || "").toLowerCase();
+          const aId = String(a.id || "").toLowerCase();
+          const bId = String(b.id || "").toLowerCase();
+          const aUser = normalize(a.username || "");
+          const bUser = normalize(b.username || "");
+          const aName = normalize(a.nome_completo || "");
+          const bName = normalize(b.nome_completo || "");
+
+          if (aCode === cleanQuery && bCode !== cleanQuery) return -1;
+          if (aCode !== cleanQuery && bCode === cleanQuery) return 1;
+
+          if (aId === cleanQuery && bId !== cleanQuery) return -1;
+          if (aId !== cleanQuery && bId === cleanQuery) return 1;
+
+          if (aUser === cleanQuery && bUser !== cleanQuery) return -1;
+          if (aUser !== cleanQuery && bUser === cleanQuery) return 1;
+          
+          if (aName === cleanQuery && bName !== cleanQuery) return -1;
+          if (aName !== cleanQuery && bName === cleanQuery) return 1;
+
+          const aCodeStarts = aCode.startsWith(cleanQuery);
+          const bCodeStarts = bCode.startsWith(cleanQuery);
+          if (aCodeStarts && !bCodeStarts) return -1;
+          if (!aCodeStarts && bCodeStarts) return 1;
+
+          const aUserStarts = aUser.startsWith(cleanQuery);
+          const bUserStarts = bUser.startsWith(cleanQuery);
+          if (aUserStarts && !bUserStarts) return -1;
+          if (!aUserStarts && bUserStarts) return 1;
+          
+          const aNameStarts = aName.startsWith(cleanQuery);
+          const bNameStarts = bName.startsWith(cleanQuery);
+          if (aNameStarts && !bNameStarts) return -1;
+          if (!aNameStarts && bNameStarts) return 1;
+
+          return aUser.localeCompare(bUser);
+        });
+
+      return filtered.slice(0, 50); // Show top 50 results
+    }
+    
+    // Idea 2: If no search, show recently active (from purchases) + latest added
+    const activeIds = new Set(purchases.map(p => Number(p.customerId)));
+    const activeCustomers = customers.filter(c => activeIds.has(Number(c.id)));
+    
+    if (activeCustomers.length >= 30) {
+      return activeCustomers.slice(0, 30);
+    }
+    
+    const additional = [...customers]
+      .filter(c => !activeIds.has(Number(c.id)))
+      .sort((a, b) => Number(b.id) - Number(a.id))
+      .slice(0, 30 - activeCustomers.length);
+      
+    return [...activeCustomers, ...additional].sort((a, b) => (a.codigo_cliente || 999999) - (b.codigo_cliente || 999999));
+  }, [clientesSearch, customers, purchases]);
   const [processingIds, setProcessingIds] = useState<string[]>([]);
 
   // Live Config State
@@ -433,6 +514,7 @@ export default function App() {
   // Context Menu & Delete Modal State
   const [contextMenu, setContextMenu] = useState<{ visible: boolean, x: number, y: number, customerId: number | null } | null>(null);
   const [deleteModal, setDeleteModal] = useState<{ visible: boolean, customerId: number | null } | null>(null);
+  const [blockModal, setBlockModal] = useState<{ visible: boolean, customer: Customer | null }>({ visible: false, customer: null });
 
   // Import State
   const [importFiles, setImportFiles] = useState<File[]>([]);
@@ -1033,6 +1115,11 @@ export default function App() {
 
     const activeCustomer = acertoActiveCustomer;
     if (!activeCustomer) return;
+    
+    if (activeCustomer.bloqueada) {
+      showToast(`⚠️ Cliente BLOQUEADA não pode fazer novas compras.`);
+      return;
+    }
 
     const isValid = await validateRef(acertoRef, 'submit');
     if (!isValid) {
@@ -1976,8 +2063,24 @@ export default function App() {
     }
   };
 
-  const toggleCustomerBlock = async (customer: Customer) => {
-    if (!supabase) return;
+  const toggleCustomerBlock = (customer: Customer) => {
+    setBlockModal({ visible: true, customer });
+  };
+
+  const confirmBlockCustomer = async () => {
+    const customer = blockModal.customer;
+    if (!customer) return;
+    
+    setBlockModal({ visible: false, customer: null });
+
+    if (!supabase) {
+      setCustomers(prev => prev.map(c => 
+        c.id === customer.id ? { ...c, bloqueada: !customer.bloqueada } : c
+      ));
+      showToast(`Cliente ${customer.bloqueada ? 'desbloqueada' : 'bloqueada'} (Modo Local)`);
+      return;
+    }
+
     try {
       const { error } = await supabase
         .from('live_clientes')
@@ -3134,20 +3237,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-white/5 text-sm">
-                      {customers
-                        .filter(c => {
-                          const search = normalize(clientesSearch);
-                          if (!search) return true;
-                          
-                          const name = normalize(c.nome_completo || '');
-                          const user = normalize(c.username || '');
-                          const code = String(c.codigo_cliente || '');
-                          
-                          return name.includes(search) || user.includes(search) || code.includes(search);
-                        })
-                        // Sort by code natively
-                        .sort((a, b) => (a.codigo_cliente || 999999) - (b.codigo_cliente || 999999))
-                        .map((cliente) => (
+                      {displayedCustomers.map((cliente) => (
                         <tr key={cliente.id} className="hover:bg-white/[0.02] transition-colors">
                           <td className="p-3 font-mono text-[#ccff00] font-black">
                             {cliente.codigo_cliente || '-'}
@@ -3231,20 +3321,28 @@ export default function App() {
                                 </button>
                               </div>
                             ) : (
-                              <div 
-                                onClick={() => {
-                                  setEditingCustomerObservacoes(Number(cliente.id));
-                                  setTempObservacoes(cliente.observacoes || '');
-                                }}
-                                className="group flex items-center gap-2 cursor-text"
-                              >
-                                <span className={cn(
-                                  "text-xs truncate max-w-[200px] md:max-w-xs",
-                                  cliente.observacoes ? "text-white/60" : "text-white/20 italic"
-                                )}>
-                                  {cliente.observacoes || 'Adicionar observação...'}
-                                </span>
-                                <Edit2 className="w-3 h-3 text-white/0 group-hover:text-white/40 transition-colors" />
+                              <div>
+                                <div 
+                                  onClick={() => {
+                                    setEditingCustomerObservacoes(Number(cliente.id));
+                                    setTempObservacoes(cliente.observacoes || '');
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    if (!cliente.observacoes) return;
+                                    const rect = e.currentTarget.getBoundingClientRect();
+                                    setHoveredObs({ text: cliente.observacoes, x: rect.left, y: rect.top });
+                                  }}
+                                  onMouseLeave={() => setHoveredObs(null)}
+                                  className="group/obs flex items-center gap-2 cursor-text"
+                                >
+                                  <span className={cn(
+                                    "text-xs truncate max-w-[200px] md:max-w-xs",
+                                    cliente.observacoes ? "text-white/60" : "text-white/20 italic"
+                                  )}>
+                                    {cliente.observacoes || 'Adicionar observação...'}
+                                  </span>
+                                  <Edit2 className="w-3 h-3 text-white/0 group-hover/obs:text-white/40 transition-colors" />
+                                </div>
                               </div>
                             )}
                           </td>
@@ -4033,6 +4131,55 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Block Confirmation Modal */}
+      <AnimatePresence>
+        {blockModal.visible && blockModal.customer && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[120] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-[#111] border border-red-500/30 rounded-xl p-6 w-full max-w-md shadow-[0_0_50px_rgba(239,68,68,0.15)]"
+            >
+              <div className="flex items-center gap-3 text-red-500 mb-4">
+                <AlertTriangle className="w-6 h-6" />
+                <h3 className="font-black text-lg tracking-tight uppercase">
+                  {blockModal.customer.bloqueada ? 'Desbloquear Cliente?' : 'Bloquear Cliente?'}
+                </h3>
+              </div>
+              <p className="text-white/60 text-sm mb-6 text-center">
+                {blockModal.customer.bloqueada 
+                  ? `Deseja realmente DESBLOQUEAR a cliente ${blockModal.customer.nome_completo || blockModal.customer.username}?`
+                  : `Deseja realmente BLOQUEAR a cliente ${blockModal.customer.nome_completo || blockModal.customer.username}? Ela não poderá fazer novas compras na live.`
+                }
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setBlockModal({ visible: false, customer: null })}
+                  className="px-4 py-2 rounded-md font-bold text-sm text-white/40 hover:text-white hover:bg-white/5 transition-colors"
+                >
+                  CANCELAR
+                </button>
+                <button
+                  onClick={confirmBlockCustomer}
+                  autoFocus
+                  className={cn("px-4 py-2 rounded-md text-white font-black text-sm transition-colors",
+                    blockModal.customer.bloqueada ? "bg-emerald-500 hover:bg-emerald-600 shadow-[0_0_15px_rgba(16,185,129,0.3)]" : "bg-red-500 hover:bg-red-600 shadow-[0_0_15px_rgba(239,68,68,0.3)]"
+                  )}
+                >
+                  {blockModal.customer.bloqueada ? 'SIM, DESBLOQUEAR' : 'SIM, BLOQUEAR'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Custom Confirmation Modal */}
       <AnimatePresence>
         {confirmAction && (
@@ -4255,6 +4402,28 @@ export default function App() {
                 </button>
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Tooltip Overhead */}
+      <AnimatePresence>
+        {hoveredObs && (
+          <motion.div
+            initial={{ opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 5 }}
+            transition={{ duration: 0.15 }}
+            className="fixed z-[999] pointer-events-none transform -translate-y-full pb-3 max-w-sm w-max"
+            style={{ 
+              top: hoveredObs.y,
+              left: Math.min(hoveredObs.x, window.innerWidth - 300) 
+            }}
+          >
+            <div className="bg-[#111]/95 backdrop-blur-md border border-[#ccff00]/50 text-white/90 text-[13px] leading-relaxed p-4 rounded-xl shadow-[0_10px_40px_-10px_rgba(204,255,0,0.3)] break-words whitespace-pre-wrap relative">
+              {hoveredObs.text}
+              <div className="absolute -bottom-1.5 left-6 w-3 h-3 bg-[#111] border-b border-r border-[#ccff00]/50 rotate-45"></div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
