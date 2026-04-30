@@ -1,0 +1,124 @@
+javascript:(function(){
+const id='monitor-arrastavel';
+if(document.getElementById(id))document.getElementById(id).remove();
+
+const painel=document.createElement('div');
+painel.id=id;
+painel.style="position:fixed;top:10px;right:10px;width:340px;height:96vh;background:#1a1a1a;color:white;z-index:9999;padding:10px;font-family:sans-serif;border-left:4px solid #d62976;box-shadow:-5px 0 15px rgba(0,0,0,0.5);display:flex;flex-direction:column;";
+
+painel.innerHTML=`
+<h3 style='margin:0 0 6px 0;font-size:14px;text-align:center;'>📲 Monitor de Comentários</h3>
+<input id="blackInput" placeholder="Adicionar palavra irrelevante" style="margin-bottom:6px;padding:4px;width:100%;">
+<button id="exportar" style="margin-bottom:6px;padding:6px;background:#333;color:#fff;border:none;cursor:pointer;">Exportar CSV</button>
+<div id='lista-p' style='flex:1;overflow:auto;'></div>
+`;
+
+document.body.appendChild(painel);
+
+const lista=document.getElementById('lista-p');
+const input=document.getElementById('blackInput');
+const btnExport=document.getElementById('exportar');
+
+// ====== DADOS ======
+let comentarios=JSON.parse(localStorage.getItem('comentarios_live')||'[]');
+let ignorar=JSON.parse(localStorage.getItem('blacklist_live')||'[]');
+
+// controle de duplicados
+let ids=new Set(comentarios.map(c=>c.usuario+c.texto));
+
+// ====== FUNÇÕES ======
+function salvar(){
+  localStorage.setItem('comentarios_live',JSON.stringify(comentarios));
+}
+
+function salvarBlacklist(){
+  localStorage.setItem('blacklist_live',JSON.stringify(ignorar));
+}
+
+function adicionarComentario(u,t){
+  const texto=t.toLowerCase().trim();
+  
+  const comentario={
+    usuario:u,
+    texto:t,
+    data:new Date().toISOString()
+  };
+
+  comentarios.push(comentario);
+  salvar();
+
+  // FILTRO VISUAL (não afeta salvamento)
+  const irrelevante =
+    ignorar.some(p=>texto===p) ||
+    texto.length<=2;
+
+  if(!irrelevante){
+    criarItem(u,t);
+  }
+}
+
+function criarItem(u,t){
+  const div=document.createElement('div');
+  div.style="margin-bottom:4px;padding:6px;background:#2a2a2a;border-left:4px solid #ffdc80;border-radius:4px;cursor:grab;user-select:all;";
+  div.setAttribute('draggable','true');
+
+  div.ondragstart=(e)=>{
+    e.dataTransfer.setData('text/plain',u+" - "+t);
+    div.style.opacity='0.5';
+  };
+
+  div.ondragend=()=>div.style.opacity='1';
+
+  div.innerHTML=`
+    <strong style="color:#ffdc80;">${u}</strong>
+    <span style="font-size:11px;color:#bbb;display:block;">${t}</span>
+  `;
+
+  lista.prepend(div);
+
+  if(lista.children.length>20){
+    lista.removeChild(lista.lastChild);
+  }
+}
+
+// ====== INPUT BLACKLIST ======
+input.addEventListener('keydown',e=>{
+  if(e.key==='Enter' && input.value.trim()){
+    ignorar.push(input.value.toLowerCase());
+    salvarBlacklist();
+    input.value='';
+  }
+});
+
+// ====== EXPORTAÇÃO ======
+btnExport.onclick=()=>{
+  const linhas=comentarios.map(c=>`${c.usuario};${c.texto};${c.data}`);
+  const blob=new Blob([linhas.join('\n')],{type:'text/csv'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='comentarios_live.csv';
+  a.click();
+};
+
+// ====== CAPTURA ======
+setInterval(()=>{
+  const spans=document.querySelectorAll('div[role="button"] span[dir="auto"]');
+
+  spans.forEach(s=>{
+    const t=s.innerText;
+    const pai=s.closest('div');
+
+    let u=pai?pai.querySelector('span')?.innerText:'Usuario';
+    u=u.replace('@','').trim();
+
+    const idU=u+t;
+
+    if(!ids.has(idU) && t.length>1){
+      ids.add(idU);
+      adicionarComentario(u,t);
+    }
+  });
+
+},800);
+
+})();
