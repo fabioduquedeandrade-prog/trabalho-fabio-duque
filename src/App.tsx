@@ -466,7 +466,7 @@ export default function App() {
               if (customer && !recoveredShoppingList.some(c => c.id === customer.id)) {
                 recoveredShoppingList.push({
                   ...customer,
-                  purchaseCount: v.live_vendas_itens?.length || 0
+                  purchaseCount: v.qtd_live || 0
                 });
               }
 
@@ -539,74 +539,38 @@ export default function App() {
     return str.toLowerCase().replace(/(?:^|\s)\S/g, (a) => a.toUpperCase());
   };
 
-  const getNextAvailableCustomerCode = async (): Promise<number> => {
-    if (!supabase) return 1;
-    
-    // Busca todos os códigos existentes (não nulos) ordenados
-    const { data: allCodes, error } = await supabase
-      .from('live_clientes')
-      .select('codigo_cliente')
-      .not('codigo_cliente', 'is', null)
-      .order('codigo_cliente', { ascending: true });
+  const getNextAvailableCustomerCode = (): number => {
+    const codes = customers
+      .map(c => Number(c.codigo_cliente))
+      .filter(code => !isNaN(code) && code > 0)
+      .sort((a, b) => a - b);
 
-    if (error || !allCodes || allCodes.length === 0) return 1;
-
-    const codes = allCodes.map(d => Number(d.codigo_cliente));
-    
-    // Se a lista não começar no 1, o primeiro buraco é o 1
+    if (codes.length === 0) return 1;
     if (codes[0] > 1) return 1;
 
-    // Procura o primeiro salto na sequência (ex: 1, 2, 5 -> buraco é 3)
     for (let i = 0; i < codes.length - 1; i++) {
       if (codes[i + 1] > codes[i] + 1) {
         return codes[i] + 1;
       }
     }
 
-    // Se não houver buracos no meio, pega o próximo após o último
     return codes[codes.length - 1] + 1;
   };
 
-  const getNextAvailableClientId = async (): Promise<number> => {
-    if (!supabase) {
-      // Fallback local se o Supabase não estiver configurado
-      const existingIds = customers
-        .map(c => Number(c.id))
-        .filter(id => !isNaN(id))
-        .sort((a, b) => a - b);
-      
-      if (existingIds.length === 0 || existingIds[0] > 1) return 1;
-      
-      for (let i = 0; i < existingIds.length - 1; i++) {
-        if (existingIds[i + 1] > existingIds[i] + 1) {
-          return existingIds[i] + 1;
-        }
-      }
-      return (existingIds[existingIds.length - 1] || 0) + 1;
-    }
+  const getNextAvailableClientId = (): number => {
+    const existingIds = customers
+      .map(c => Number(c.id))
+      .filter(id => !isNaN(id) && id > 0)
+      .sort((a, b) => a - b);
     
-    // Busca todos os IDs existentes ordenados para encontrar o primeiro "buraco"
-    const { data: allIds, error } = await supabase
-      .from('live_clientes')
-      .select('id')
-      .order('id', { ascending: true });
-
-    if (error || !allIds || allIds.length === 0) return 1;
-
-    const ids = allIds.map(d => Number(d.id));
+    if (existingIds.length === 0 || existingIds[0] > 1) return 1;
     
-    // Se a lista não começar no 1, o primeiro buraco é o 1
-    if (ids[0] > 1) return 1;
-
-    // Procura o primeiro salto na sequência (ex: 1, 2, 6 -> buraco é 3)
-    for (let i = 0; i < ids.length - 1; i++) {
-      if (ids[i + 1] > ids[i] + 1) {
-        return ids[i] + 1;
+    for (let i = 0; i < existingIds.length - 1; i++) {
+      if (existingIds[i + 1] > existingIds[i] + 1) {
+        return existingIds[i] + 1;
       }
     }
-
-    // Se não houver buracos no meio, pega o próximo após o último
-    return ids[ids.length - 1] + 1;
+    return existingIds[existingIds.length - 1] + 1;
   };
 
   // Optimization: Global customers map for O(1) lookups
@@ -828,30 +792,65 @@ export default function App() {
     setActiveIndex(filtered.length > 0 ? 0 : -1);
   }, [searchQuery, customers]);
 
-  // Search Logic
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchQuery.trim()) return;
-
-    // If we have filtered results, pick the active one or the first one
-    if (filteredResults.length > 0) {
-      const selected = activeIndex >= 0 ? filteredResults[activeIndex] : filteredResults[0];
-      
-      // GARANTIA: Se o cliente selecionado do dropdown não tiver código, geramos agora ANTES de abrir o modal
-      if (!selected.codigo_cliente) {
-        const nextCode = await getNextAvailableCustomerCode();
-        setSelectedCustomer({ ...selected, codigo_cliente: nextCode });
+  const processCustomerSelection = (customer: Customer | null, searchQueryText: string) => {
+    if (customer) {
+      if (!customer.codigo_cliente) {
+        const nextCode = getNextAvailableCustomerCode();
+        const updated = { ...customer, codigo_cliente: nextCode };
+        
+        if (supabase) {
+          supabase.from('live_clientes').update({ codigo_cliente: nextCode }).eq('id', customer.id).then(({error}) => {
+             if (error) console.error('Error updating customer code:', error);
+          });
+        }
+        
+        setCustomers(prev => prev.map(c => String(c.id) === String(customer.id) ? updated : c));
+        setSelectedCustomer(updated);
       } else {
-        setSelectedCustomer(selected);
+        setSelectedCustomer(customer);
+      }
+    } else {
+      const cleanQuery = normalize(searchQueryText);
+      const nextId = getNextAvailableClientId(); 
+      const nextCode = getNextAvailableCustomerCode();
+      
+      const newCustomer: Customer = {
+        id: nextId,
+        codigo_cliente: nextCode,
+        username: /^\d+$/.test(cleanQuery) ? '' : searchQueryText,
+        nome_completo: 'Novo Cliente',
+        purchaseCount: 0
+      };
+
+      if (supabase) {
+        supabase.from('live_clientes').insert({
+          id: nextId,
+          codigo_cliente: nextCode,
+          username: newCustomer.username,
+          nome_completo: newCustomer.nome_completo
+        }).then(({error}) => {
+          if (error) console.error('Error reserving new customer:', error);
+        });
       }
       
-      setSearchQuery('');
-      setFilteredResults([]);
-      setActiveIndex(-1);
+      setCustomers(prev => [...prev, newCustomer].sort((a, b) => (a.username || '').localeCompare(b.username || '')));
+      setSelectedCustomer(newCustomer);
+    }
+
+    setSearchQuery('');
+    setFilteredResults([]);
+    setActiveIndex(-1);
+  };
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim() || isSavingSale) return;
+
+    if (filteredResults.length > 0) {
+      const selected = activeIndex >= 0 ? filteredResults[activeIndex] : filteredResults[0];
+      processCustomerSelection(selected, searchQuery);
       return;
     }
 
-    // Fallback: search in Supabase customers directly or create temporary
     const rawQuery = searchQuery.startsWith('@') ? searchQuery.slice(1) : searchQuery;
     const cleanQuery = normalize(rawQuery);
     
@@ -860,7 +859,6 @@ export default function App() {
       const nStr = normalize(c.nome_completo || "");
       const codeStr = c.codigo_cliente !== null && c.codigo_cliente !== undefined ? String(c.codigo_cliente) : "";
       
-      // Se a query for apenas números, prioriza check exato no código (Sacola)
       if (/^\d+$/.test(cleanQuery)) {
         return codeStr === cleanQuery || String(c.id) === cleanQuery;
       }
@@ -871,29 +869,7 @@ export default function App() {
              (uStr + " " + nStr) === cleanQuery;
     });
 
-    if (found) {
-      // Se a cliente já existe mas não tem código (vinda do estoque, por exemplo)
-      if (!found.codigo_cliente) {
-        const nextCode = await getNextAvailableCustomerCode();
-        setSelectedCustomer({ ...found, codigo_cliente: nextCode });
-      } else {
-        setSelectedCustomer(found);
-      }
-    } else {
-      // É um novo cliente, geramos o código da sacola IMEDIATAMENTE para aparecer no modal
-      const nextId = await getNextAvailableClientId();
-      const nextCode = await getNextAvailableCustomerCode();
-
-      setSelectedCustomer({
-        id: nextId,
-        codigo_cliente: nextCode,
-        username: /^\d+$/.test(cleanQuery) ? '' : searchQuery,
-        nome_completo: 'Novo Cliente',
-        purchaseCount: 0
-      });
-    }
-    setSearchQuery('');
-    setFilteredResults([]);
+    processCustomerSelection(found || null, searchQuery);
   };
 
   const confirmPurchase = useCallback(async () => {
@@ -952,10 +928,17 @@ export default function App() {
             
             if (cError) throw cError;
 
-            // Se for um cliente novo (que não estava na lista mestre), adicionamos agora para buscas futuras
             setCustomers(prev => {
-              const alreadyInList = prev.some(c => String(c.id) === String(selectedCustomer.id));
-              if (!alreadyInList) {
+              const existingIndex = prev.findIndex(c => String(c.id) === String(selectedCustomer.id));
+              if (existingIndex >= 0) {
+                const newArray = [...prev];
+                newArray[existingIndex] = {
+                  ...newArray[existingIndex],
+                  nome_completo: finalName,
+                  codigo_cliente: customerCode
+                };
+                return newArray;
+              } else {
                 return [...prev, {
                   id: Number(selectedCustomer.id),
                   username: selectedCustomer.username,
@@ -963,7 +946,6 @@ export default function App() {
                   codigo_cliente: customerCode
                 }].sort((a, b) => a.username.localeCompare(b.username));
               }
-              return prev;
             });
 
             // 2. Depois salva a venda
@@ -1201,8 +1183,8 @@ export default function App() {
         total: customerPurchases.reduce((acc, p) => acc + (p.value * p.quantity), 0),
         paid: isPaid,
         delivered: deliveredIds.includes(String(cid)),
-        qtdLive: latestCustomer.purchaseCount || 0,
-        codigo_cliente: latestCustomer.codigo_cliente
+        qtdLive: customer.purchaseCount || 0,
+        codigo_cliente: latestCustomer.codigo_cliente || customer.codigo_cliente
       };
     });
 
@@ -2302,16 +2284,9 @@ export default function App() {
                         <button
                           key={c.id}
                           ref={activeIndex === idx ? activeItemRef : null}
-                          onClick={async () => {
-                            if (!c.codigo_cliente) {
-                              const nextCode = await getNextAvailableCustomerCode();
-                              setSelectedCustomer({ ...c, codigo_cliente: nextCode });
-                            } else {
-                              setSelectedCustomer(c);
-                            }
-                            setSearchQuery('');
-                            setFilteredResults([]);
-                            setActiveIndex(-1);
+                          onClick={() => {
+                            if (isSavingSale) return;
+                            processCustomerSelection(c, searchQuery);
                           }}
                           className={cn(
                             "w-full flex items-center gap-4 p-3 transition-all border-b border-white/5 last:border-0 group/item",
